@@ -1,0 +1,56 @@
+name: Relay Model Health Monitor
+
+on:
+  workflow_dispatch:
+    inputs:
+      push_wechat:
+        description: "Push full report to WeChat via ServerChan"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+  schedule:
+    # Run every 30 minutes (UTC)
+    - cron: "*/30 * * * *"
+
+jobs:
+  check-models:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate runtime config from Secrets
+        env:
+          RELAY_BASE_URL: ${{ secrets.RELAY_BASE_URL }}
+          RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: |
+          python3 -c '
+          import json, os
+          with open("config.example.json", "r", encoding="utf-8") as f:
+              cfg = json.load(f)
+          if os.environ.get("RELAY_BASE_URL"):
+              cfg["base_url"] = os.environ["RELAY_BASE_URL"]
+          if os.environ.get("RELAY_TOKEN"):
+              cfg["token"] = os.environ["RELAY_TOKEN"]
+          if os.environ.get("SERVERCHAN_KEY"):
+              cfg["serverchan_sendkey"] = os.environ["SERVERCHAN_KEY"]
+          with open("config.json", "w", encoding="utf-8") as f:
+              json.dump(cfg, f, ensure_ascii=False, indent=2)
+          '
+
+      - name: Run model health check
+        run: |
+          if [ "${{ github.event.inputs.push_wechat }}" = "true" ]; then
+            python3 scripts/relay_cli.py check --push
+          else
+            python3 scripts/relay_cli.py poll-step
+          fi

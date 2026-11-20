@@ -1,0 +1,19 @@
+{
+  "base_url": "http://your-relay-gateway:3060",
+  "token": "sk-your-api-token-here",
+  "serverchan_sendkey": "SCT-your-serverchan-sendkey-here",
+  "web_port": 3065,
+  "poll_interval_seconds": 300,
+  "request_timeout_seconds": 4,
+  "max_concurrency": 5,
+  "state_dir": ".state",
+  "watch_models": [
+    "glm-5.3-flash[1M]",
+    "glm-5.3-flash",
+    "glm-5.3",
+    "MiniMax-M3",
+    "MiniMax-M2.7-highspeed",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5"
+  ]
+}

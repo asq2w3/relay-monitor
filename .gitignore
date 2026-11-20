@@ -1,0 +1,21 @@
+# Secrets & Local Config
+config.json
+.env
+*.key
+*.pem
+
+# Runtime State & Logs
+.state/
+*.log
+*.pid
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
