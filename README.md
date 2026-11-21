@@ -120,7 +120,8 @@ relay-monitor daemon stop      # 停止后台守护进程
 ## 常见问题排查 (FAQ)
 
 1. **为什么 `cloudflared` 隧道偶尔返回 530 或连不上？**
-   - 如果你的机器开启了系统代理（如 Clash/Mihomo TUN 模式），UDP/QUIC 流量可能会影响隧道连接。请确保隧道能正常访问外网，或直接运行 `relay-monitor daemon stop && relay-monitor daemon start` 重连生成新域名。
+   - 如果开启了代理软件（如 Clash / Mihomo TUN 模式），`cloudflared` 需要连接 `region1/region2.v2.argotunnel.com:7844`（QUIC/HTTP2）。若当前代理节点禁用了 UDP 或拦截了 7844 端口，就会出现 `HTTP 530`。可尝试切换支持 UDP 的代理节点、将 `*.argotunnel.com` 设为直连，或直接使用无需隧道的 **部署方式二（GitHub Actions 云端巡检）**。
+   - 本工具已内置主动探针看门狗，断线或持续 530 时会自动尝试重连并将新链接推送到微信。
 2. **为什么微信一直没收到定时提醒？**
    - 为了避免微信消息轰炸，`poll-step` 与定时守护**仅在状态发生关键跃迁时推送**（例如：GLM 从不可用变为可用 `RECOVERED`，或全站模型突然全部宕机 `ALL_DOWN`）。如需立即强制测试推送，运行 `relay-monitor check --push`。
 3. **如何增减特别关注的模型（例如自定义 1M 上下文别名）？**

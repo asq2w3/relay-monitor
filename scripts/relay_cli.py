@@ -73,6 +73,8 @@ def cmd_check(args):
         print("\n🔴 离线/异常模型:")
         for m, err in sorted(curr_state["dead_models"].items()):
             print(f"  - {m:<32} {err}")
+        if alive == 0 and any("HTTP 401" in str(e) for e in curr_state["dead_models"].values()):
+            print("\n⚠️  提示：检测到 HTTP 401 鉴权失败，你的 API Token 可能已失效，请运行 `relay-monitor init` 更新。")
 
     if args.push:
         print("\n📲 正在推送报告至手机微信...")
@@ -244,13 +246,19 @@ def cmd_daemon(args):
             "--port", str(port),
             "--tunnel",
         ]
-        log_out = open(log_file, "a", encoding="utf-8")
-        popen_kwargs = {"stdout": log_out, "stderr": subprocess.STDOUT}
+        # Rotate daemon.log if it exceeds 2MB to prevent unbounded growth
+        if os.path.exists(log_file) and os.path.getsize(log_file) > 2 * 1024 * 1024:
+            log_mode = "w"
+        else:
+            log_mode = "a"
+
+        popen_kwargs = {}
         if os.name == "nt":
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         else:
             popen_kwargs["start_new_session"] = True
-        proc = subprocess.Popen(cmd, **popen_kwargs)
+        with open(log_file, log_mode, encoding="utf-8") as log_out:
+            proc = subprocess.Popen(cmd, stdout=log_out, stderr=subprocess.STDOUT, **popen_kwargs)
         with open(pid_file, "w", encoding="utf-8") as f:
             f.write(str(proc.pid))
 

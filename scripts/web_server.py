@@ -1,3 +1,4 @@
+import html
 import http.server
 import json
 import os
@@ -195,6 +196,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       z-index: 1000;
       box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5);
     }
+    .search-box {
+      width: 100%;
+      background: var(--card-bg);
+      color: var(--text);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      margin-bottom: 12px;
+      outline: none;
+    }
+    .search-box:focus { border-color: var(--blue); }
   </style>
 </head>
 <body>
@@ -206,8 +219,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <div class="glm-card">
       <div class="glm-info">
-        <h3 id="watch-title">智谱 GLM 系列 (主推)</h3>
-        <p>包含 1M 上下文专用模型</p>
+        <h3 id="watch-title">重点关注模型</h3>
+        <p id="watch-sub">实时健康监控</p>
       </div>
       <div id="glm-badge" class="badge badge-green">检测中...</div>
     </div>
@@ -227,6 +240,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <button id="btn-scan" class="btn-primary" onclick="triggerScan()">🔄 立即重新检测</button>
       <button id="btn-push" class="btn-wechat" onclick="triggerPush()">📲 推送到微信</button>
     </div>
+
+    <input id="search-input" class="search-box" type="search" placeholder="🔍 搜索模型名称（如 glm / sonnet / minimax）..." oninput="render()">
 
     <div class="tabs">
       <button class="tab-btn active" onclick="setFilter('all', this)">全部</button>
@@ -281,6 +296,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         document.getElementById('avg-latency').textContent = '--s';
       }
 
+      const kw = (currentData.watch_keyword || 'glm').toLowerCase();
+      document.getElementById('watch-title').textContent = kw === 'glm' ? '智谱 GLM 系列 (主推)' : `重点关注: ${kw.toUpperCase()}`;
+      document.getElementById('watch-sub').textContent = kw === 'glm' ? '包含 1M 上下文专用模型' : `匹配关键词 "${kw}" 的全部模型`;
+
       const glmBadge = document.getElementById('glm-badge');
       if (currentData.glm_alive && currentData.glm_alive.length > 0) {
         glmBadge.className = 'badge badge-green';
@@ -307,8 +326,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         return (a.latency || 99) - (b.latency || 99);
       });
 
+      const searchQuery = (document.getElementById('search-input').value || '').trim().toLowerCase();
       const filtered = items.filter(it => {
         const n = it.name.toLowerCase();
+        if (searchQuery && !n.includes(searchQuery)) return false;
         if (currentFilter === 'glm') return n.includes('glm');
         if (currentFilter === 'claude') return n.includes('claude');
         if (currentFilter === 'minimax') return n.includes('minimax');
@@ -393,7 +414,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       btn.disabled = true;
       btn.textContent = '⏳ 推送中...';
       try {
-        const res = await fetch(apiUrl('/api/push'));
+        const res = await fetch(apiUrl('/api/push'), { headers: { 'Accept': 'application/json' } });
         const data = await res.json();
         if (res.status === 429) {
           showToast(data.error || '推送冷却中，请稍后再试');
@@ -411,6 +432,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     loadStatus();
+    setInterval(() => {
+      if (document.visibilityState === 'visible') loadStatus();
+    }, 60000);
   </script>
 </body>
 </html>
@@ -433,6 +457,23 @@ class RelayMonitorHandler(http.server.BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self._safe_write(body)
+
+    def _send_push_html(self, code, heading, detail, dash_href, ok):
+        color = "#10b981" if ok else "#f59e0b"
+        page = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{html.escape(heading)}</title>
+<style>body{{background:#0f172a;color:#f8fafc;font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}}
+.card{{background:#1e293b;border:1px solid #334155;border-radius:16px;padding:28px 22px;max-width:420px;width:100%;text-align:center}}
+h2{{font-size:20px;color:{color};margin:0 0 10px}}p{{font-size:14px;color:#cbd5e1;margin:0 0 22px}}
+a{{display:inline-block;background:#6366f1;color:#fff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:600;font-size:14px}}</style></head>
+<body><div class="card"><h2>{html.escape(heading)}</h2><p>{html.escape(detail)}</p><a href="{html.escape(dash_href)}">📊 打开实时监控看板</a></div></body></html>"""
+        body = page.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self._safe_write(body)
@@ -505,10 +546,19 @@ class RelayMonitorHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/push":
+            qs = urllib.parse.parse_qs(parsed.query)
+            accept = (self.headers.get("Accept") or "").lower()
+            wants_html = ("text/html" in accept) and (qs.get("format", [""])[0].lower() != "json")
+            key_param = qs.get("key", [""])[0]
+            dash_href = f"/?key={urllib.parse.quote(key_param, safe='')}" if key_param else "/"
+
             now = time.time()
             if now - _LAST_PUSH_TS < PUSH_COOLDOWN_SEC:
                 remain = int(PUSH_COOLDOWN_SEC - (now - _LAST_PUSH_TS)) + 1
-                self._send_json(429, {"success": False, "error": f"推送冷却中，请 {remain} 秒后再试"})
+                if wants_html:
+                    self._send_push_html(429, "⏳ 推送冷却中", f"请 {remain} 秒后再试，避免重复刷屏。", dash_href, False)
+                else:
+                    self._send_json(429, {"success": False, "error": f"推送冷却中，请 {remain} 秒后再试"})
                 return
             with _SCAN_LOCK:
                 results = scan_models(cfg)
@@ -519,12 +569,20 @@ class RelayMonitorHandler(http.server.BaseHTTPRequestHandler):
             success = push_wechat(title, report_md, cfg)
             if success:
                 _LAST_PUSH_TS = time.time()
-            self._send_json(200, {
-                "success": success,
-                "alive_count": curr_state["alive_count"],
-                "total": curr_state["total"],
-                "glm_alive": curr_state["glm_alive"],
-            })
+
+            if wants_html:
+                kw = html.escape(curr_state.get("watch_keyword", "glm").upper())
+                glm_txt = f"🟢 {kw} 正常 ({len(curr_state['glm_alive'])} 个)" if curr_state["glm_alive"] else f"🔴 {kw} 暂不可用"
+                heading = "✅ 已推送最新报告到微信" if success else "❌ 微信推送失败"
+                detail = f"当前 {curr_state['alive_count']}/{curr_state['total']} 模型在线 · {glm_txt}"
+                self._send_push_html(200, heading, detail, dash_href, success)
+            else:
+                self._send_json(200, {
+                    "success": success,
+                    "alive_count": curr_state["alive_count"],
+                    "total": curr_state["total"],
+                    "glm_alive": curr_state["glm_alive"],
+                })
             return
 
         else:

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -81,8 +82,8 @@ def start_tunnel(port=3065):
                 env["http_proxy"] = f"http://127.0.0.1:{p_port}"
                 break
 
-    out = open(log_file, "w", encoding="utf-8")
-    proc = subprocess.Popen(cmd, env=env, stdout=out, stderr=subprocess.STDOUT)
+    with open(log_file, "w", encoding="utf-8") as out:
+        proc = subprocess.Popen(cmd, env=env, stdout=out, stderr=subprocess.STDOUT)
 
     tunnel_url = None
     pattern = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
@@ -110,31 +111,79 @@ def start_tunnel(port=3065):
         return None, proc
 
 
+def _probe_tunnel_alive(url, cfg):
+    """Verify public tunnel URL is actually serving HTTP 200 (detects hung QUIC / 530)."""
+    dash_url, _ = format_public_links(url, cfg)
+    try:
+        req = urllib.request.Request(dash_url, method="HEAD", headers={"User-Agent": "RelayMonitorWatchdog/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return 200 <= resp.status < 400
+    except Exception:
+        return False
+
+
 def start_tunnel_with_watchdog(port=3065):
-    """Start tunnel and spawn a watchdog thread to auto-restart if cloudflared exits."""
-    state = {"proc": None, "stop": False}
+    """Start tunnel and spawn a watchdog thread to auto-restart on crash or hung HTTP 530."""
+    state = {"proc": None, "url": None, "stop": False}
     url, proc = start_tunnel(port)
     state["proc"] = proc
+    state["url"] = url
+
+    def _restart_and_notify(reason):
+        print(f"[Tunnel Watchdog] {reason}, restarting cloudflared...")
+        p = state["proc"]
+        if p is not None and p.poll() is None:
+            try:
+                p.terminate()
+                p.wait(timeout=3)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        new_url, new_proc = start_tunnel(port)
+        state["proc"] = new_proc
+        state["url"] = new_url
+        if new_url:
+            try:
+                cfg = load_config()
+                dash_url, push_url = format_public_links(new_url, cfg)
+                push_wechat(
+                    "📱 手机看板隧道已自动重连",
+                    f"### 📱 手机公网看板已自动恢复\n\n- **手机看板**：{dash_url}\n- **微信一键查**：{push_url}",
+                    cfg,
+                )
+            except Exception:
+                pass
 
     def _watch():
+        consecutive_fails = 0
+        last_probe = time.time()
         while not state["stop"]:
             time.sleep(10)
+            if state["stop"]:
+                break
             p = state["proc"]
-            if p is not None and p.poll() is not None and not state["stop"]:
-                print("[Tunnel Watchdog] cloudflared exited unexpectedly, restarting...")
-                new_url, new_proc = start_tunnel(port)
-                state["proc"] = new_proc
-                if new_url:
-                    try:
-                        cfg = load_config()
-                        dash_url, push_url = format_public_links(new_url, cfg)
-                        push_wechat(
-                            "📱 手机看板隧道已自动重连",
-                            f"### 📱 手机公网看板已自动恢复\n\n- **手机看板**：{dash_url}\n- **微信一键查**：{push_url}",
-                            cfg,
-                        )
-                    except Exception:
-                        pass
+            if p is not None and p.poll() is not None:
+                consecutive_fails = 0
+                _restart_and_notify("cloudflared exited unexpectedly")
+                last_probe = time.time()
+                continue
+            # Active public health check every 120s to catch hung QUIC / 530
+            if state["url"] and (time.time() - last_probe >= 120):
+                last_probe = time.time()
+                try:
+                    cfg = load_config()
+                except Exception:
+                    cfg = {}
+                if _probe_tunnel_alive(state["url"], cfg):
+                    consecutive_fails = 0
+                else:
+                    consecutive_fails += 1
+                    print(f"[Tunnel Watchdog] Health probe failed ({consecutive_fails}/3)")
+                    if consecutive_fails >= 3:
+                        consecutive_fails = 0
+                        _restart_and_notify("tunnel unresponsive (3 consecutive probe failures)")
 
     t = threading.Thread(target=_watch, daemon=True)
     t.start()

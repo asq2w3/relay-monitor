@@ -19,7 +19,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from core import CONFIG_PATH, SKILL_DIR, normalize_base_url, push_wechat, save_config
+from core import CONFIG_PATH, SKILL_DIR, normalize_base_url, push_wechat, save_config, test_relay_connection
+from tunnel import format_public_links, get_current_url
 
 
 def _detect_claude_code_env():
@@ -139,8 +140,18 @@ def run_wizard():
     print("\n--- 第 1 步：配置中转站接口 ---")
     if detected_url:
         print("💡 已从 ~/.claude/settings.json 自动识别到配置，直接回车即可沿用！")
-    base_url = normalize_base_url(_prompt("1. 请输入中转站地址 (Base URL)", default_url))
-    token = _prompt("2. 请输入中转站 API Token", default_token, secret=True)
+    while True:
+        base_url = normalize_base_url(_prompt("1. 请输入中转站地址 (Base URL)", default_url))
+        token = _prompt("2. 请输入中转站 API Token", default_token, secret=True)
+        print("⏳ 正在测试中转站连通性与 Token 有效性...")
+        ok, info = test_relay_connection(base_url, token)
+        if ok:
+            print(f"✅ 中转站连接成功！已获取到 {info} 个模型。")
+            break
+        print(f"⚠️  连接测试未通过：{info}")
+        retry = input("是否重新输入地址或 Token？（选 n 将强制保存并继续）[y/N]: ").strip().lower()
+        if retry not in ("y", "yes"):
+            break
     api_format = _prompt("3. 接口格式 (anthropic 或 openai，默认自动回退)", existing_cfg.get("api_format", "anthropic")).lower()
     if api_format not in ("anthropic", "openai"):
         api_format = "anthropic"
@@ -197,10 +208,28 @@ def run_wizard():
     _install_cloudflared()
     _setup_github_secrets(cfg)
 
+    start_now = input("\n是否立即启动 24h 后台守护与手机公网看板？[Y/n]: ").strip().lower()
+    if start_now not in ("n", "no"):
+        cli_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "relay_cli.py")
+        subprocess.run([sys.executable, cli_path, "daemon", "start"], check=False)
+        url = get_current_url()
+        if url and cfg.get("serverchan_sendkey"):
+            dash_url, push_url = format_public_links(url, cfg)
+            send_link = input("是否将最新手机看板链接直接发送到你的微信？[Y/n]: ").strip().lower()
+            if send_link not in ("n", "no"):
+                desp = (
+                    "### 📱 你的手机监控入口已就绪！\n\n"
+                    f"- **手机 Web 实时看板**：{dash_url}\n"
+                    f"- **微信一键极速查**：{push_url}\n\n"
+                    "建议收藏本条消息，或将看板网址「添加到主屏幕」随时查看！"
+                )
+                if push_wechat("📱 Relay Monitor 手机监控入口已就绪", desp, cfg):
+                    print("✅ 手机访问入口已发送到你的微信！")
+
     print("\n============================================================")
-    print("🎉 初始化完成！现在你可以直接使用以下命令：")
+    print("🎉 初始化完成！常用命令：")
     print("   relay-monitor check --push   # 立即测速并推送到微信")
-    print("   relay-monitor daemon start   # 启动手机看板与 24h 自动巡检")
+    print("   relay-monitor daemon status  # 查看后台守护与手机链接")
     print("============================================================")
 
 

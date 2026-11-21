@@ -63,6 +63,25 @@ def ensure_state_dir(cfg):
     return state_dir
 
 
+def test_relay_connection(base_url, token):
+    """Quick connectivity & auth check against /v1/models. Returns (ok, count_or_error)."""
+    url = f"{normalize_base_url(base_url)}/v1/models"
+    req = urllib.request.Request(url)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("x-api-key", token)
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            models = [m["id"] for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+            return True, len(models)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False, f"认证失败 (HTTP {e.code})，请检查 API Token 是否正确"
+        return False, f"HTTP {e.code}: {e.reason}"
+    except Exception as e:
+        return False, f"无法连接中转站: {e}"
+
+
 def get_models(cfg):
     url = f"{cfg['base_url']}/v1/models"
     req = urllib.request.Request(url)

@@ -15,6 +15,10 @@ on:
     # 每 15 分钟自动云端巡检一次 (UTC 时间，对应 GitHub Actions 免费额度)
     - cron: "*/15 * * * *"
 
+concurrency:
+  group: relay-monitor-state
+  cancel-in-progress: false
+
 jobs:
   check-models:
     runs-on: ubuntu-latest
@@ -42,6 +46,8 @@ jobs:
           RELAY_BASE_URL: ${{ secrets.RELAY_BASE_URL }}
           RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          WATCH_KEYWORD: ${{ vars.WATCH_KEYWORD }}
+          API_FORMAT: ${{ vars.API_FORMAT }}
         run: |
           if [ -z "$RELAY_BASE_URL" ] || [ -z "$RELAY_TOKEN" ]; then
             echo "❌ 缺少 RELAY_BASE_URL 或 RELAY_TOKEN！请在仓库 Settings -> Secrets and variables -> Actions 中配置。"
@@ -55,6 +61,10 @@ jobs:
           cfg["token"] = os.environ["RELAY_TOKEN"]
           if os.environ.get("SERVERCHAN_KEY"):
               cfg["serverchan_sendkey"] = os.environ["SERVERCHAN_KEY"]
+          if os.environ.get("WATCH_KEYWORD"):
+              cfg["watch_keyword"] = os.environ["WATCH_KEYWORD"]
+          if os.environ.get("API_FORMAT"):
+              cfg["api_format"] = os.environ["API_FORMAT"]
           with open("config.json", "w", encoding="utf-8") as f:
               json.dump(cfg, f, ensure_ascii=False, indent=2)
           '
