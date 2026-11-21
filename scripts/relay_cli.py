@@ -15,15 +15,26 @@ sys.path.insert(0, SCRIPT_DIR)
 from core import load_config, scan_models, analyze_and_update_state, push_wechat, format_markdown_report
 from web_server import run_server
 from tunnel import start_tunnel, get_current_url
+from setup_wizard import run_wizard
 
 PID_FILE = os.path.join(SKILL_DIR, ".state", "daemon.pid")
 LOG_FILE = os.path.join(SKILL_DIR, ".state", "daemon.log")
+
+def _write_github_summary(curr_state):
+    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_file:
+        try:
+            with open(summary_file, "a", encoding="utf-8") as f:
+                f.write(format_markdown_report(curr_state) + "\n")
+        except Exception:
+            pass
 
 def cmd_check(args):
     cfg = load_config()
     print("⏳ 正在探测中转站所有模型 (并发探测)...")
     results = scan_models(cfg)
     curr_state, _ = analyze_and_update_state(results, cfg)
+    _write_github_summary(curr_state)
     
     total = curr_state["total"]
     alive = curr_state["alive_count"]
@@ -54,6 +65,7 @@ def cmd_poll_step(args):
     cfg = load_config()
     results = scan_models(cfg)
     curr_state, prev_state = analyze_and_update_state(results, cfg)
+    _write_github_summary(curr_state)
     
     # Check trigger conditions:
     # 1. GLM recovered
@@ -178,6 +190,9 @@ def main():
     parser = argparse.ArgumentParser(description="中转站模型监控与移动端联动工作流 CLI")
     subparsers = parser.add_subparsers(dest="command")
 
+    # init
+    subparsers.add_parser("init", help="交互式傻瓜配置向导（含微信 SendKey 获取引导与测试）")
+
     # check
     p_check = subparsers.add_parser("check", help="单次全量检测模型可用性与延迟")
     p_check.add_argument("--push", action="store_true", help="探测完成后将报告推送到微信")
@@ -199,7 +214,9 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    if args.command == "check":
+    if args.command == "init":
+        run_wizard()
+    elif args.command == "check":
         cmd_check(args)
     elif args.command == "poll-step":
         cmd_poll_step(args)

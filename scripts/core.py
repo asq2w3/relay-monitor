@@ -18,7 +18,9 @@ def load_config():
         return json.load(f)
 
 def ensure_state_dir(cfg):
-    state_dir = cfg.get("state_dir", os.path.join(SKILL_DIR, ".state"))
+    state_dir = cfg.get("state_dir", ".state")
+    if not os.path.isabs(state_dir):
+        state_dir = os.path.join(SKILL_DIR, state_dir)
     os.makedirs(state_dir, exist_ok=True)
     return state_dir
 
