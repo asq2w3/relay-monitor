@@ -18,6 +18,8 @@ on:
 jobs:
   check-models:
     runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

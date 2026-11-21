@@ -5,7 +5,7 @@
 import json
 import os
 import platform
-import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -19,7 +19,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from core import CONFIG_PATH, SKILL_DIR, push_wechat
+from core import CONFIG_PATH, SKILL_DIR, normalize_base_url, push_wechat, save_config
 
 
 def _detect_claude_code_env():
@@ -30,12 +30,12 @@ def _detect_claude_code_env():
     try:
         with open(settings_path, "r", encoding="utf-8") as f:
             env = json.load(f).get("env", {})
-        raw_url = env.get("ANTHROPIC_BASE_URL", "")
-        token = env.get("ANTHROPIC_AUTH_TOKEN", "")
-        # Extract embedded upstream URL if wrapped in local proxy path
-        matches = re.findall(r"https?://[^\s/]+(?::\d+)?", raw_url)
-        base_url = matches[-1] if matches else raw_url
-        return base_url.rstrip("/"), token
+        raw_url = (env.get("ANTHROPIC_BASE_URL") or "").strip()
+        token = (env.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        # Unwrap proxy prefix like http://127.0.0.1:18787/bili/http://real-host:3060
+        last_http = max(raw_url.rfind("https://"), raw_url.rfind("http://"))
+        base_url = raw_url[last_http:] if last_http >= 0 else raw_url
+        return normalize_base_url(base_url), token
     except Exception:
         return "", ""
 
@@ -87,26 +87,33 @@ def _install_cloudflared():
         print(f"❌ 下载失败（请检查网络或代理）: {e}")
 
 
+def _find_git_repo_dir():
+    for candidate in (os.getcwd(), SKILL_DIR):
+        if os.path.isdir(os.path.join(candidate, ".git")):
+            return candidate
+    return None
+
+
 def _setup_github_secrets(cfg):
     if not shutil.which("gh"):
         return
-    git_dir = os.path.join(SKILL_DIR, ".git")
-    if not os.path.exists(git_dir):
+    repo_dir = _find_git_repo_dir()
+    if not repo_dir:
         return
-    ans = input("\n检测到 GitHub CLI (gh) 与当前仓库，是否一键将配置写入 GitHub Actions Secrets？[y/N]: ").strip().lower()
+    ans = input(f"\n检测到 GitHub CLI (gh) 与仓库 ({repo_dir})，是否一键将配置写入 GitHub Actions Secrets？[y/N]: ").strip().lower()
     if ans not in ("y", "yes"):
         return
 
-    secrets = {
+    secrets_map = {
         "RELAY_BASE_URL": cfg["base_url"],
         "RELAY_TOKEN": cfg["token"],
         "SERVERCHAN_KEY": cfg["serverchan_sendkey"],
     }
-    for k, v in secrets.items():
+    for k, v in secrets_map.items():
         if not v:
             continue
         try:
-            subprocess.run(["gh", "secret", "set", k, "--body", v], cwd=SKILL_DIR, check=True)
+            subprocess.run(["gh", "secret", "set", k, "--body", v], cwd=repo_dir, check=True)
             print(f"  ✅ 已设置 Secret: {k}")
         except Exception as e:
             print(f"  ❌ 设置 {k} 失败: {e}")
@@ -114,7 +121,7 @@ def _setup_github_secrets(cfg):
 
 def run_wizard():
     print("============================================================")
-    print("🚀 Relay Monitor 傻瓜式初始化向导")
+    print("🚀 Relay Monitor 傻瓜式初始化向导 (Linux / Windows / macOS)")
     print("============================================================")
 
     existing_cfg = {}
@@ -131,9 +138,12 @@ def run_wizard():
 
     print("\n--- 第 1 步：配置中转站接口 ---")
     if detected_url:
-        print(f"💡 已从 ~/.claude/settings.json 自动识别到配置，直接回车即可沿用！")
-    base_url = _prompt("1. 请输入中转站地址 (Base URL)", default_url).rstrip("/")
+        print("💡 已从 ~/.claude/settings.json 自动识别到配置，直接回车即可沿用！")
+    base_url = normalize_base_url(_prompt("1. 请输入中转站地址 (Base URL)", default_url))
     token = _prompt("2. 请输入中转站 API Token", default_token, secret=True)
+    api_format = _prompt("3. 接口格式 (anthropic 或 openai，默认自动回退)", existing_cfg.get("api_format", "anthropic")).lower()
+    if api_format not in ("anthropic", "openai"):
+        api_format = "anthropic"
 
     print("\n--- 第 2 步：获取并绑定微信通知 Token (Server酱 SendKey) ---")
     print("📱 只需 10 秒即可免费绑定个人微信提醒（无需自建服务器）：")
@@ -152,7 +162,7 @@ def run_wizard():
 
     sendkey = ""
     while True:
-        sendkey = _prompt("\n3. 请粘贴你的 Server酱 SendKey (留空跳过)", default_key, secret=True)
+        sendkey = _prompt("\n4. 请粘贴你的 Server酱 SendKey (留空跳过)", default_key, secret=True)
         if not sendkey:
             print("⚠️  未配置 SendKey，将跳过微信推送功能。")
             break
@@ -175,12 +185,14 @@ def run_wizard():
     cfg.update(existing_cfg)
     cfg["base_url"] = base_url
     cfg["token"] = token
+    cfg["api_format"] = api_format
     cfg["serverchan_sendkey"] = sendkey
+    if not cfg.get("web_access_token"):
+        cfg["web_access_token"] = secrets.token_urlsafe(12)
 
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.chmod(CONFIG_PATH, 0o600)
-    print(f"\n✅ 配置已加密保存至: {CONFIG_PATH} (权限 600)")
+    save_config(cfg)
+    print(f"\n✅ 配置已安全保存至: {CONFIG_PATH}")
+    print(f"🔐 已生成手机看板访问保护密钥 (web_access_token)，防止公网陌生人滥用接口。")
 
     _install_cloudflared()
     _setup_github_secrets(cfg)

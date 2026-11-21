@@ -1,15 +1,30 @@
 import http.server
 import json
-import urllib.parse
 import os
+import secrets
 import sys
+import threading
+import time
+import urllib.parse
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-SKILL_DIR = os.path.dirname(SCRIPT_DIR)
-STATE_DIR = os.path.join(SKILL_DIR, ".state")
 sys.path.insert(0, SCRIPT_DIR)
 
-from core import load_config, scan_models, analyze_and_update_state, push_wechat, format_markdown_report
+from core import (
+    analyze_and_update_state,
+    ensure_access_token,
+    ensure_state_dir,
+    format_markdown_report,
+    load_config,
+    push_wechat,
+    scan_models,
+)
+
+_SCAN_LOCK = threading.Lock()
+_LAST_SCAN_TS = 0.0
+_LAST_PUSH_TS = 0.0
+SCAN_COOLDOWN_SEC = 8
+PUSH_COOLDOWN_SEC = 15
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -142,6 +157,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 10px;
     }
     .model-name {
       font-size: 14px;
@@ -152,6 +168,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-shrink: 0;
     }
     .lat-tag {
       font-size: 11px;
@@ -189,7 +206,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <div class="glm-card">
       <div class="glm-info">
-        <h3>智谱 GLM 系列 (主推)</h3>
+        <h3 id="watch-title">智谱 GLM 系列 (主推)</h3>
         <p>包含 1M 上下文专用模型</p>
       </div>
       <div id="glm-badge" class="badge badge-green">检测中...</div>
@@ -226,39 +243,55 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <script>
     let currentData = null;
     let currentFilter = 'all';
+    const urlParams = new URLSearchParams(window.location.search);
+    const accessKey = urlParams.get('key') || '';
+
+    function apiUrl(path) {
+      return accessKey ? `${path}?key=${encodeURIComponent(accessKey)}` : path;
+    }
 
     function showToast(msg) {
       const t = document.getElementById('toast');
-      t.innerText = msg;
+      t.textContent = msg;
       t.style.display = 'block';
-      setTimeout(() => { t.style.display = 'none'; }, 2500);
+      setTimeout(() => { t.style.display = 'none'; }, 2800);
+    }
+
+    function shortErrorTag(err) {
+      if (!err) return '× 离线';
+      const s = String(err);
+      if (s.includes('HTTP 429')) return '× 429 限流';
+      if (s.includes('HTTP 503')) return '× 503 无号';
+      if (s.includes('HTTP 502')) return '× 502 网关错';
+      if (s.includes('HTTP 400')) return '× 400 不支持';
+      if (s.toLowerCase().includes('timed out')) return '× 超时';
+      return '× 异常';
     }
 
     function render() {
       if (!currentData) return;
-      document.getElementById('update-time').innerText = '最后检测：' + (currentData.time_str || '--');
-      document.getElementById('alive-count').innerText = `${currentData.alive_count}/${currentData.total}`;
-      
-      // Calculate avg latency
+      document.getElementById('update-time').textContent = '最后检测：' + (currentData.time_str || '--');
+      document.getElementById('alive-count').textContent = `${currentData.alive_count}/${currentData.total}`;
+
       const latencies = Object.values(currentData.alive_models || {});
       if (latencies.length > 0) {
         const avg = (latencies.reduce((a, b) => a + b, 0) / latencies.length).toFixed(2);
-        document.getElementById('avg-latency').innerText = avg + 's';
+        document.getElementById('avg-latency').textContent = avg + 's';
+      } else {
+        document.getElementById('avg-latency').textContent = '--s';
       }
 
-      // GLM Badge
       const glmBadge = document.getElementById('glm-badge');
       if (currentData.glm_alive && currentData.glm_alive.length > 0) {
         glmBadge.className = 'badge badge-green';
-        glmBadge.innerHTML = '● 正常可用';
+        glmBadge.textContent = '● 正常可用';
       } else {
         glmBadge.className = 'badge badge-red';
-        glmBadge.innerHTML = '● 暂时限流/维护';
+        glmBadge.textContent = '● 暂时限流/维护';
       }
 
-      // Model List
       const listContainer = document.getElementById('model-list');
-      listContainer.innerHTML = '';
+      listContainer.textContent = '';
 
       const items = [];
       for (const [m, lat] of Object.entries(currentData.alive_models || {})) {
@@ -285,14 +318,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       filtered.forEach(it => {
         const div = document.createElement('div');
         div.className = 'model-item';
-        let tagHtml = '';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'model-name';
+        nameSpan.textContent = it.name;
+
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'model-meta';
+
+        const tagSpan = document.createElement('span');
         if (it.alive) {
-          const cls = it.latency < 1.5 ? 'lat-fast' : 'lat-med';
-          tagHtml = `<span class="lat-tag ${cls}">● ${it.latency}s</span>`;
+          tagSpan.className = 'lat-tag ' + (it.latency < 1.5 ? 'lat-fast' : 'lat-med');
+          tagSpan.textContent = `● ${it.latency}s`;
         } else {
-          tagHtml = `<span class="lat-tag lat-err">× 离线</span>`;
+          tagSpan.className = 'lat-tag lat-err';
+          tagSpan.textContent = shortErrorTag(it.err);
+          tagSpan.title = it.err || '';
         }
-        div.innerHTML = `<span class="model-name">${it.name}</span><div class="model-meta">${tagHtml}</div>`;
+
+        metaDiv.appendChild(tagSpan);
+        div.appendChild(nameSpan);
+        div.appendChild(metaDiv);
         listContainer.appendChild(div);
       });
     }
@@ -306,7 +352,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     async function loadStatus() {
       try {
-        const res = await fetch('/api/status');
+        const res = await fetch(apiUrl('/api/status'));
+        if (res.status === 403) {
+          showToast('🔒 访问被拒绝：缺少或无效的访问密钥 (?key=...)');
+          return;
+        }
         currentData = await res.json();
         render();
       } catch (e) {
@@ -317,155 +367,220 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     async function triggerScan() {
       const btn = document.getElementById('btn-scan');
       btn.disabled = true;
-      btn.innerText = '⏳ 探测中(约4s)...';
+      btn.textContent = '⏳ 探测中...';
       try {
-        const res = await fetch('/api/scan');
-        currentData = await res.json();
-        render();
-        showToast('探测完成！');
+        const res = await fetch(apiUrl('/api/scan'));
+        const data = await res.json();
+        if (res.status === 429) {
+          showToast(data.error || '请求过于频繁，请稍后再试');
+        } else if (!res.ok) {
+          showToast(data.error || '探测失败');
+        } else {
+          currentData = data;
+          render();
+          showToast('探测完成！');
+        }
       } catch (e) {
         showToast('探测请求失败');
       } finally {
         btn.disabled = false;
-        btn.innerText = '🔄 立即重新检测';
+        btn.textContent = '🔄 立即重新检测';
       }
     }
 
     async function triggerPush() {
       const btn = document.getElementById('btn-push');
       btn.disabled = true;
-      btn.innerText = '⏳ 推送中...';
+      btn.textContent = '⏳ 推送中...';
       try {
-        const res = await fetch('/api/push');
+        const res = await fetch(apiUrl('/api/push'));
         const data = await res.json();
-        if (data.success) {
+        if (res.status === 429) {
+          showToast(data.error || '推送冷却中，请稍后再试');
+        } else if (data.success) {
           showToast('✅ 报告已成功推送到微信！');
         } else {
-          showToast('❌ 推送失败：' + (data.error || '未知错误'));
+          showToast('❌ 推送失败：' + (data.error || '请检查 SendKey'));
         }
       } catch (e) {
         showToast('推送请求异常');
       } finally {
         btn.disabled = false;
-        btn.innerText = '📲 推送到微信';
+        btn.textContent = '📲 推送到微信';
       }
     }
 
-    // Auto-load on start
     loadStatus();
   </script>
 </body>
 </html>
 """
 
+
 class RelayMonitorHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        # Keep server quiet
         return
+
+    def _safe_write(self, body_bytes):
+        if self.command == "HEAD":
+            return
+        try:
+            self.wfile.write(body_bytes)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self._safe_write(body)
+
+    def _check_auth(self, parsed, cfg):
+        expected = (cfg.get("web_access_token") or "").strip()
+        if not expected:
+            return True
+        qs = urllib.parse.parse_qs(parsed.query)
+        provided = (qs.get("key", [""])[0] or self.headers.get("X-Access-Key", "")).strip()
+        return secrets.compare_digest(provided, expected)
 
     def do_HEAD(self):
         self.do_GET()
 
     def do_GET(self):
+        global _LAST_SCAN_TS, _LAST_PUSH_TS
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
-        
-        cfg = load_config()
-        state_file = os.path.join(STATE_DIR, "monitor_state.json")
+
+        try:
+            cfg = load_config()
+        except Exception as e:
+            self._send_json(500, {"error": str(e)})
+            return
+
+        if not self._check_auth(parsed, cfg):
+            self._send_json(403, {"error": "Forbidden: invalid or missing access key (?key=...)"})
+            return
+
+        state_dir = ensure_state_dir(cfg)
+        state_file = os.path.join(state_dir, "monitor_state.json")
 
         if path in ("/", "/index.html"):
+            body = HTML_TEMPLATE.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
+            self._safe_write(body)
             return
 
         elif path == "/api/status":
             if os.path.exists(state_file):
-                with open(state_file, "r", encoding="utf-8") as f:
-                    content = f.read()
-            else:
-                # Scan once if no state exists
+                try:
+                    with open(state_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    self._send_json(200, data)
+                    return
+                except Exception:
+                    pass
+            with _SCAN_LOCK:
                 results = scan_models(cfg)
                 curr_state, _ = analyze_and_update_state(results, cfg)
-                content = json.dumps(curr_state, ensure_ascii=False)
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(content.encode("utf-8"))
+                _LAST_SCAN_TS = time.time()
+            self._send_json(200, curr_state)
             return
 
         elif path == "/api/scan":
-            results = scan_models(cfg)
-            curr_state, _ = analyze_and_update_state(results, cfg)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps(curr_state, ensure_ascii=False).encode("utf-8"))
+            now = time.time()
+            if now - _LAST_SCAN_TS < SCAN_COOLDOWN_SEC:
+                remain = int(SCAN_COOLDOWN_SEC - (now - _LAST_SCAN_TS)) + 1
+                self._send_json(429, {"error": f"探测冷却中，请 {remain} 秒后再试"})
+                return
+            with _SCAN_LOCK:
+                results = scan_models(cfg)
+                curr_state, _ = analyze_and_update_state(results, cfg)
+                _LAST_SCAN_TS = time.time()
+            self._send_json(200, curr_state)
             return
 
         elif path == "/api/push":
-            # Mobile shortcut: scan and push directly to WeChat
-            results = scan_models(cfg)
-            curr_state, _ = analyze_and_update_state(results, cfg)
+            now = time.time()
+            if now - _LAST_PUSH_TS < PUSH_COOLDOWN_SEC:
+                remain = int(PUSH_COOLDOWN_SEC - (now - _LAST_PUSH_TS)) + 1
+                self._send_json(429, {"success": False, "error": f"推送冷却中，请 {remain} 秒后再试"})
+                return
+            with _SCAN_LOCK:
+                results = scan_models(cfg)
+                curr_state, _ = analyze_and_update_state(results, cfg)
+                _LAST_SCAN_TS = time.time()
             report_md = format_markdown_report(curr_state)
             title = f"【手机即时查询】中转站模型状态 ({curr_state['alive_count']}/{curr_state['total']} 可用)"
             success = push_wechat(title, report_md, cfg)
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps({
+            if success:
+                _LAST_PUSH_TS = time.time()
+            self._send_json(200, {
                 "success": success,
                 "alive_count": curr_state["alive_count"],
                 "total": curr_state["total"],
-                "glm_alive": curr_state["glm_alive"]
-            }, ensure_ascii=False).encode("utf-8"))
+                "glm_alive": curr_state["glm_alive"],
+            })
             return
 
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send_json(404, {"error": "Not Found"})
 
-import threading
-import time
 
 def _background_polling_loop():
     while True:
         try:
             cfg = load_config()
-            interval = cfg.get("poll_interval_seconds", 300)
+            interval = max(30, int(cfg.get("poll_interval_seconds", 300)))
             time.sleep(interval)
-            results = scan_models(cfg)
-            curr_state, prev_state = analyze_and_update_state(results, cfg)
-            
+            with _SCAN_LOCK:
+                results = scan_models(cfg)
+                curr_state, prev_state = analyze_and_update_state(results, cfg)
+
+            kw = curr_state.get("watch_keyword", "glm").upper()
             if curr_state["glm_status"] == "RECOVERED":
                 models_str = ", ".join(curr_state["glm_alive"])
-                title = "🎉 智谱 GLM 系列模型已恢复可用！"
-                desp = f"### 🎉 GLM 渠道已正式恢复可用！\n\n恢复模型：**{models_str}**\n\n本地 Claude Code 1M 上下文已就绪，可随时直接开工使用！\n\n*巡检时间：{curr_state['time_str']}*"
+                title = f"🎉 {kw} 系列模型已恢复可用！"
+                desp = (
+                    f"### 🎉 {kw} 渠道已正式恢复可用！\n\n"
+                    f"恢复模型：**{models_str}**\n\n"
+                    f"现在可以随时开工使用！\n\n*巡检时间：{curr_state['time_str']}*"
+                )
                 push_wechat(title, desp, cfg)
             elif curr_state["overall_status"] == "ALL_DOWN" and prev_state.get("overall_status") != "ALL_DOWN":
                 title = "🚨 警报：中转站模型已全线宕机！"
-                desp = f"### 🚨 中转站全部模型不可用\n\n所有模型均无法响应，请检查中转站服务器状态。\n\n*巡检时间：{curr_state['time_str']}*"
+                desp = (
+                    f"### 🚨 中转站全部 {curr_state['total']} 个模型不可用\n\n"
+                    f"所有探测均无法响应，请检查中转站状态。\n\n*巡检时间：{curr_state['time_str']}*"
+                )
+                push_wechat(title, desp, cfg)
+            elif curr_state.get("overall_recovered"):
+                title = f"⚡ 中转站已解除全线熔断 ({curr_state['alive_count']}/{curr_state['total']} 可用)"
+                desp = format_markdown_report(curr_state)
                 push_wechat(title, desp, cfg)
         except Exception:
-            time.sleep(10)
+            time.sleep(15)
 
-def run_server(port=3065):
+
+def run_server(port=3065, host=None):
+    cfg = load_config()
+    ensure_access_token(cfg)
+    bind_host = host or cfg.get("web_host", "127.0.0.1")
     t = threading.Thread(target=_background_polling_loop, daemon=True)
     t.start()
-    server_address = ("0.0.0.0", port)
+    server_address = (bind_host, port)
     httpd = http.server.ThreadingHTTPServer(server_address, RelayMonitorHandler)
-    print(f"[Web Dashboard] Running at http://0.0.0.0:{port}")
+    print(f"[Web Dashboard] Running at http://{bind_host}:{port}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n[Web Dashboard] Stopped.")
 
+
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 3065
-    run_server(port)
+    p = int(sys.argv[1]) if len(sys.argv) > 1 else 3065
+    run_server(p)

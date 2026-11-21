@@ -45,12 +45,16 @@ def main():
             with open(shim, "w", encoding="utf-8") as f:
                 f.write(cmd_content)
         print(f"[✓] 已创建 Windows 全局命令: {shim_paths[-1]}")
+        if len(shim_paths) == 1 and bin_dir.lower() not in os.environ.get("PATH", "").lower():
+            print(f"💡 提示: 请将 {bin_dir} 加入系统环境变量 PATH，即可在任意终端直接运行 relay-monitor")
     else:
         link_path = os.path.join(bin_dir, "relay-monitor")
         if os.path.lexists(link_path):
             os.remove(link_path)
         os.symlink(cli_path, link_path)
         print(f"[✓] 已创建全局命令软链: {link_path}")
+        if bin_dir not in os.environ.get("PATH", "").split(":"):
+            print(f'💡 提示: 请将 {bin_dir} 加入 PATH (export PATH="$HOME/.local/bin:$PATH")')
 
     print("============================================================")
     print(f"[✓] 已安装 Relay Monitor 技能至: {skill_dir}")
