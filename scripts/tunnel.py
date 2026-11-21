@@ -8,31 +8,50 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 SKILL_DIR = os.path.dirname(SCRIPT_DIR)
 STATE_DIR = os.path.join(SKILL_DIR, ".state")
 import shutil
+import socket
 
-CLOUDFLARED_BIN = shutil.which("cloudflared") or os.path.expanduser("~/.local/bin/cloudflared")
+_BIN_NAME = "cloudflared.exe" if os.name == "nt" else "cloudflared"
+CLOUDFLARED_BIN = shutil.which("cloudflared") or os.path.expanduser(f"~/.local/bin/{_BIN_NAME}")
+
+
+def _is_port_open(host, port):
+    try:
+        with socket.create_connection((host, port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
 
 def start_tunnel(port=3065):
     os.makedirs(STATE_DIR, exist_ok=True)
     url_file = os.path.join(STATE_DIR, "public_url.txt")
     log_file = os.path.join(STATE_DIR, "cloudflared.log")
 
-    if not os.path.exists(CLOUDFLARED_BIN):
-        print(f"[Tunnel Error] {CLOUDFLARED_BIN} not found")
-        return None
+    if not CLOUDFLARED_BIN or not os.path.exists(CLOUDFLARED_BIN):
+        print(f"[Tunnel Error] {CLOUDFLARED_BIN} not found. Run 'relay-monitor init' to install it.")
+        return None, None
 
-    # Clean up any stale cloudflared instances
+    # Clean up any stale cloudflared instances (cross-platform)
     try:
-        subprocess.run(["pkill", "-f", "cloudflared tunnel"], stderr=subprocess.DEVNULL)
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/IM", "cloudflared.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.run(["pkill", "-f", "cloudflared tunnel"], stderr=subprocess.DEVNULL)
         time.sleep(0.5)
     except Exception:
         pass
 
     cmd = [CLOUDFLARED_BIN, "tunnel", "--url", f"http://127.0.0.1:{port}"]
     env = os.environ.copy()
-    env["all_proxy"] = "socks5://127.0.0.1:7897"
-    env["https_proxy"] = "http://127.0.0.1:7897"
-    env["http_proxy"] = "http://127.0.0.1:7897"
-    with open(log_file, "w") as out:
+    # Respect existing proxy env vars, or auto-use local Clash/Mihomo if listening
+    if not env.get("https_proxy") and not env.get("HTTPS_PROXY"):
+        for p_port in (7897, 7890, 10809):
+            if _is_port_open("127.0.0.1", p_port):
+                env["all_proxy"] = f"socks5://127.0.0.1:{p_port}"
+                env["https_proxy"] = f"http://127.0.0.1:{p_port}"
+                env["http_proxy"] = f"http://127.0.0.1:{p_port}"
+                break
+    with open(log_file, "w", encoding="utf-8") as out:
         proc = subprocess.Popen(cmd, env=env, stdout=out, stderr=subprocess.STDOUT)
 
     # Wait up to 15 seconds to find the trycloudflare.com URL

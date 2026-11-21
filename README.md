@@ -1,6 +1,6 @@
 # Relay Monitor — 中转站大模型巡检、手机实时看板与微信自动通知工作流
 
-> **纯 Python 标准库实现 · 零第三方依赖 · 支持本地傻瓜式一键部署 & GitHub Actions 云端零服务器托管**
+> **纯 Python 标准库实现 · 零第三方依赖 · 全平台通用（Linux / Windows / macOS）& GitHub Actions 云端托管**
 
 当你使用的 AI 中转站（如 Sub2API / OneAPI / NewAPI 等兼容 Anthropic `/v1/messages` 格式的网关）频繁出现 **智谱 GLM 限流（429）** 或 **上游账号池耗尽（503）** 时，本工作流可以帮助你：
 1. **并发测速**：秒级探测中转站全部模型的真实可用性与响应延迟；
@@ -42,12 +42,20 @@ flowchart LR
 
 支持 **本地 CLI 检测 + 手机端公网 Web 看板 + 24 小时守护轮询 + Antigravity 技能集成**。
 
-### 1. 克隆并运行一键安装脚本
+### 1. 克隆并运行一键安装脚本（Linux / Windows 全平台通用）
 
+**Linux / macOS：**
 ```bash
 git clone https://github.com/asq2w3/relay-monitor.git
 cd relay-monitor
-./install.sh
+./install.sh          # 或 python3 install.py
+```
+
+**Windows (PowerShell 或 CMD)：**
+```powershell
+git clone https://github.com/asq2w3/relay-monitor.git
+cd relay-monitor
+python install.py     # 或 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
 ### 2. 跟着向导一路回车即可

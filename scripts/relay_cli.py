@@ -3,6 +3,13 @@
 
 import os
 import sys
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import time
 import argparse
 import subprocess
@@ -110,6 +117,34 @@ def cmd_serve(args):
         if tunnel_proc:
             tunnel_proc.terminate()
 
+def _is_pid_running(pid):
+    if os.name == "nt":
+        try:
+            res = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True)
+            return str(pid) in res.stdout
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _stop_pid_tree(pid):
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"🛑 已停止守护进程及子进程 (PID: {pid})")
+        return
+    try:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, signal.SIGTERM)
+        print(f"🛑 已停止守护进程及子进程 (PGID: {pgid})")
+    except Exception:
+        os.kill(pid, signal.SIGTERM)
+        print(f"🛑 已停止守护进程 (PID: {pid})")
+
+
 def cmd_daemon(args):
     action = args.action
     os.makedirs(os.path.join(SKILL_DIR, ".state"), exist_ok=True)
@@ -118,15 +153,12 @@ def cmd_daemon(args):
         if os.path.exists(PID_FILE):
             with open(PID_FILE, "r") as f:
                 pid = int(f.read().strip())
-            try:
-                os.kill(pid, 0)
+            if _is_pid_running(pid):
                 print(f"🟢 后台守护进程正在运行 (PID: {pid})")
                 url = get_current_url()
                 if url:
                     print(f"📱 手机公网看板: {url}")
                 return
-            except OSError:
-                pass
         print("⚪ 后台守护进程未运行。")
         return
 
@@ -135,15 +167,9 @@ def cmd_daemon(args):
             with open(PID_FILE, "r") as f:
                 pid = int(f.read().strip())
             try:
-                pgid = os.getpgid(pid)
-                os.killpg(pgid, signal.SIGTERM)
-                print(f"🛑 已停止守护进程及子进程 (PGID: {pgid})")
-            except Exception:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    print(f"🛑 已停止守护进程 (PID: {pid})")
-                except Exception as e:
-                    print(f"停止失败: {e}")
+                _stop_pid_tree(pid)
+            except Exception as e:
+                print(f"停止失败: {e}")
             if os.path.exists(PID_FILE):
                 os.remove(PID_FILE)
         else:
@@ -154,12 +180,9 @@ def cmd_daemon(args):
         if os.path.exists(PID_FILE):
             with open(PID_FILE, "r") as f:
                 pid = int(f.read().strip())
-            try:
-                os.kill(pid, 0)
+            if _is_pid_running(pid):
                 print(f"守护进程已在运行中 (PID: {pid})")
                 return
-            except OSError:
-                pass
 
         cfg = load_config()
         port = cfg.get("web_port", 3065)
@@ -173,8 +196,13 @@ def cmd_daemon(args):
             "--port", str(port),
             "--tunnel"
         ]
-        log_out = open(LOG_FILE, "a")
-        proc = subprocess.Popen(cmd, stdout=log_out, stderr=subprocess.STDOUT, start_new_session=True)
+        log_out = open(LOG_FILE, "a", encoding="utf-8")
+        popen_kwargs = {"stdout": log_out, "stderr": subprocess.STDOUT}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        else:
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(cmd, **popen_kwargs)
         with open(PID_FILE, "w") as f:
             f.write(str(proc.pid))
                 

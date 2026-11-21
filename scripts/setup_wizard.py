@@ -8,8 +8,16 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import urllib.request
 import webbrowser
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from core import CONFIG_PATH, SKILL_DIR, push_wechat
 
@@ -43,7 +51,8 @@ def _prompt(label, default="", secret=False):
 
 
 def _install_cloudflared():
-    existing = shutil.which("cloudflared") or os.path.expanduser("~/.local/bin/cloudflared")
+    bin_name = "cloudflared.exe" if os.name == "nt" else "cloudflared"
+    existing = shutil.which("cloudflared") or os.path.expanduser(f"~/.local/bin/{bin_name}")
     if existing and os.path.exists(existing):
         print(f"✅ 已检测到 cloudflared: {existing}")
         return
@@ -55,23 +64,24 @@ def _install_cloudflared():
 
     system = platform.system().lower()
     machine = platform.machine().lower()
-    if system != "linux":
-        print("⚠️  非 Linux 系统请手动安装 cloudflared（macOS: brew install cloudflared）。")
-        return
-
     arch = "amd64" if machine in ("x86_64", "amd64") else ("arm64" if "arm" in machine or "aarch64" in machine else "")
-    if not arch:
-        print(f"⚠️  暂不支持自动下载架构 {machine}，请手动安装 cloudflared。")
+
+    if system == "windows":
+        url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+    elif system == "linux" and arch:
+        url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
+    else:
+        print("⚠️  暂不支持自动下载当前系统/架构，请手动安装 cloudflared（macOS: brew install cloudflared）。")
         return
 
-    url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
     bin_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(bin_dir, exist_ok=True)
-    target = os.path.join(bin_dir, "cloudflared")
-    print(f"⏳ 正在下载 cloudflared ({arch}) 到 {target} ...")
+    target = os.path.join(bin_dir, bin_name)
+    print(f"⏳ 正在下载 cloudflared ({system}/{arch or 'amd64'}) 到 {target} ...")
     try:
         urllib.request.urlretrieve(url, target)
-        os.chmod(target, 0o755)
+        if os.name != "nt":
+            os.chmod(target, 0o755)
         print("✅ cloudflared 安装成功！")
     except Exception as e:
         print(f"❌ 下载失败（请检查网络或代理）: {e}")
