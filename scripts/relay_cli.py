@@ -29,7 +29,13 @@ from core import (
     scan_models,
 )
 from setup_wizard import run_wizard
-from tunnel import clear_current_url, format_public_links, get_current_url, start_tunnel_with_watchdog
+from tunnel import (
+    clear_current_url,
+    format_public_links,
+    get_current_url,
+    get_tunnel_status,
+    start_tunnel_with_watchdog,
+)
 from web_server import run_server
 
 
@@ -197,13 +203,16 @@ def cmd_daemon(args):
             with open(pid_file, "r", encoding="utf-8") as f:
                 pid = int(f.read().strip())
             if _is_pid_running(pid):
-                print(f"🟢 后台守护进程正在运行 (PID: {pid})")
+                print(f"🟢 后台守护进程正在运行 (PID: {pid}) — 本地自动巡检与微信告警正常")
                 url = get_current_url()
+                t_status = get_tunnel_status()
                 if url:
                     cfg = load_config()
                     dash_url, push_url = format_public_links(url, cfg)
                     print(f"📱 手机公网看板: {dash_url}")
                     print(f"⚡ 微信一键查询: {push_url}")
+                elif t_status:
+                    print(f"⚠️  手机公网隧道: {t_status}")
                 return
         print("⚪ 后台守护进程未运行。")
         return
@@ -235,7 +244,6 @@ def cmd_daemon(args):
         ensure_access_token(cfg)
         port = cfg.get("web_port", 3065)
 
-        # Clear stale URL before spawning so we never print an outdated link
         clear_current_url()
 
         cmd = [
@@ -244,8 +252,10 @@ def cmd_daemon(args):
             os.path.realpath(__file__),
             "serve",
             "--port", str(port),
-            "--tunnel",
         ]
+        if not getattr(args, "no_tunnel", False):
+            cmd.append("--tunnel")
+
         # Rotate daemon.log if it exceeds 2MB to prevent unbounded growth
         if os.path.exists(log_file) and os.path.getsize(log_file) > 2 * 1024 * 1024:
             log_mode = "w"
@@ -262,23 +272,34 @@ def cmd_daemon(args):
         with open(pid_file, "w", encoding="utf-8") as f:
             f.write(str(proc.pid))
 
+        if getattr(args, "no_tunnel", False):
+            print(f"🚀 后台巡检守护已启动 (PID: {proc.pid}，纯本地巡检+微信告警模式)")
+            print(f"日志文件: {log_file}")
+            return
+
         print(f"🚀 后台服务与手机隧道启动中 (PID: {proc.pid})...")
         print(f"日志文件: {log_file}")
 
-        # Poll up to 15s for fresh public tunnel URL
+        # Poll up to 25s for real registered tunnel URL or early failure status
         url = None
-        for _ in range(30):
+        t_status = ""
+        for _ in range(50):
             time.sleep(0.5)
             url = get_current_url()
-            if url:
+            t_status = get_tunnel_status()
+            if url or t_status.startswith("FAILED:"):
                 break
 
         if url:
             dash_url, push_url = format_public_links(url, cfg)
             print(f"📱 手机端访问看板: {dash_url}")
             print(f"⚡ 手机微信一键查询: {push_url}")
+        elif t_status.startswith("FAILED:"):
+            print(f"⚠️  {t_status}")
+            print("✅ 本地 5 分钟自动巡检与微信恢复告警已正常运行（隧道将在后台按退避策略静默重试，不会刷屏）。")
+            print("💡 如需立即恢复手机公网看板：请在代理软件中切换支持 UDP/7844 端口的节点，或将 *.argotunnel.com 设为直连后重启守护。")
         else:
-            print("⚠️  隧道 URL 尚未生成，请稍后运行 `relay-monitor daemon status` 查看，或检查日志文件。")
+            print("⚠️  隧道连接耗时较长，请稍后运行 `relay-monitor daemon status` 查看。")
 
 
 def main():
@@ -299,6 +320,7 @@ def main():
 
     p_daemon = subparsers.add_parser("daemon", help="长期后台常驻守护管理")
     p_daemon.add_argument("action", choices=["start", "stop", "status"], help="start / stop / status")
+    p_daemon.add_argument("--no-tunnel", action="store_true", help="仅启动后台巡检与微信告警，不启动 Cloudflare 公网隧道")
 
     args = parser.parse_args()
     if not args.command:
